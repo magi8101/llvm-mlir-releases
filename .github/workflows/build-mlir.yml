@@ -3,7 +3,7 @@ name: Build MLIR Shared Libraries
 on:
   push:
     tags:
-      - "mlir-v*"
+      - "llvm-v*"
   workflow_dispatch:
     inputs:
       mlir_version:
@@ -52,8 +52,8 @@ jobs:
         shell: bash
         run: |
           RAW="${{ env.MLIR_VERSION }}"
-          # Strip "mlir-v" prefix if present
-          VERSION="${RAW#mlir-v}"
+          # Strip "llvm-v" prefix if present
+          VERSION="${RAW#llvm-v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building MLIR version: ${VERSION}"
 
