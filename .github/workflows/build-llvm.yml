@@ -1,0 +1,175 @@
+name: Build LLVM Shared Libraries
+
+on:
+  push:
+    tags:
+      - "llvm-v*"
+  workflow_dispatch:
+    inputs:
+      llvm_version:
+        description: "LLVM version tag (e.g., 18.1.8)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  LLVM_VERSION: ${{ inputs.llvm_version || github.ref_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            archive_ext: zip
+            cmake_generator: Ninja
+            shell: cmd
+          - os: ubuntu-latest
+            platform: linux-x64
+            archive_ext: tar.gz
+            cmake_generator: Ninja
+            shell: bash
+          - os: macos-latest
+            platform: macos-arm64
+            archive_ext: tar.gz
+            cmake_generator: Ninja
+            shell: bash
+
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    timeout-minutes: 360
+
+    steps:
+      - name: Derive LLVM version from tag
+        id: version
+        shell: bash
+        run: |
+          RAW="${{ env.LLVM_VERSION }}"
+          # Strip "llvm-v" prefix if present
+          VERSION="${RAW#llvm-v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building LLVM version: ${VERSION}"
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja ccache
+
+      - name: Set up MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install build tools (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          choco install ninja ccache llvm -y
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: llvm-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          max-size: 2G
+
+      - name: Clone LLVM source
+        run: |
+          git clone --depth 1 --branch llvmorg-${{ steps.version.outputs.version }} https://github.com/llvm/llvm-project.git
+
+      - name: Configure LLVM (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cmake -G Ninja -S llvm-project/llvm -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DLLVM_ENABLE_PROJECTS="clang" \
+            -DLLVM_BUILD_LLVM_DYLIB=ON \
+            -DLLVM_LINK_LLVM_DYLIB=ON \
+            -DLLVM_TARGETS_TO_BUILD="X86;AArch64" \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF
+
+      - name: Configure LLVM (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake -G Ninja -S llvm-project/llvm -B build ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install ^
+            -DCMAKE_C_COMPILER=clang-cl ^
+            -DCMAKE_CXX_COMPILER=clang-cl ^
+            -DLLVM_USE_LINKER=lld ^
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache ^
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache ^
+            -DLLVM_ENABLE_PROJECTS="clang" ^
+            -DLLVM_BUILD_LLVM_DYLIB=ON ^
+            -DLLVM_BUILD_LLVM_DYLIB_VIS=ON ^
+            -DLLVM_LINK_LLVM_DYLIB=ON ^
+            -DLLVM_TARGETS_TO_BUILD="X86;AArch64" ^
+            -DLLVM_INCLUDE_TESTS=OFF ^
+            -DLLVM_INCLUDE_EXAMPLES=OFF ^
+            -DLLVM_INCLUDE_BENCHMARKS=OFF ^
+            -DLLVM_INCLUDE_DOCS=OFF ^
+            -DLLVM_ENABLE_ASSERTIONS=OFF ^
+            -DLLVM_ENABLE_ZLIB=OFF ^
+            -DLLVM_ENABLE_ZSTD=OFF
+
+      - name: Build LLVM
+        run: cmake --build build --config Release -j 2
+
+      - name: Install LLVM
+        run: cmake --install build --config Release
+
+      - name: Package archive (Unix tar.gz)
+        if: runner.os != 'Windows'
+        working-directory: ${{ github.workspace }}
+        run: |
+          tar -czf llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz -C install .
+
+      - name: Package archive (Windows zip)
+        if: runner.os == 'Windows'
+        shell: powershell
+        working-directory: ${{ github.workspace }}
+        run: |
+          Compress-Archive -Path install\* -DestinationPath llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.zip
+
+      - name: Upload release assets
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: |
+            llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
+          tag_name: ${{ github.ref_name }}
+          name: "LLVM ${{ steps.version.outputs.version }}"
+          draft: false
+          prerelease: false
+
+      - name: Upload artifact (manual dispatch)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}
+          path: llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
+          retention-days: 7
