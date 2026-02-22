@@ -54,6 +54,8 @@ jobs:
           RAW="${{ env.LLVM_VERSION }}"
           # Strip "llvm-v" prefix if present
           VERSION="${RAW#llvm-v}"
+          # Strip "-test" suffix if present
+          VERSION="${VERSION%-test}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building LLVM version: ${VERSION}"
 
