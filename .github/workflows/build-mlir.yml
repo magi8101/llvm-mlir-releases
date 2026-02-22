@@ -52,10 +52,8 @@ jobs:
         shell: bash
         run: |
           RAW="${{ env.MLIR_VERSION }}"
-          # Strip "llvm-v" prefix if present
-          VERSION="${RAW#llvm-v}"
-          # Strip "-test" suffix if present
-          VERSION="${VERSION%-test}"
+          # Extract only the numeric semantic version (e.g. 18.1.8) using sed
+          VERSION=$(echo "$RAW" | sed -E 's/^[a-zA-Z]+-v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building MLIR version: ${VERSION}"
 
@@ -104,7 +102,7 @@ jobs:
             -DLLVM_BUILD_LLVM_DYLIB=ON \
             -DLLVM_LINK_LLVM_DYLIB=ON \
             -DMLIR_BUILD_MLIR_C_DYLIB=ON \
-            -DLLVM_TARGETS_TO_BUILD="X86;AArch64" \
+            -DLLVM_TARGETS_TO_BUILD="all" \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
@@ -129,7 +127,7 @@ jobs:
             -DLLVM_BUILD_LLVM_DYLIB_VIS=ON ^
             -DLLVM_LINK_LLVM_DYLIB=ON ^
             -DMLIR_BUILD_MLIR_C_DYLIB=ON ^
-            -DLLVM_TARGETS_TO_BUILD="X86;AArch64" ^
+            -DLLVM_TARGETS_TO_BUILD="all" ^
             -DLLVM_INCLUDE_TESTS=OFF ^
             -DLLVM_INCLUDE_EXAMPLES=OFF ^
             -DLLVM_INCLUDE_BENCHMARKS=OFF ^
