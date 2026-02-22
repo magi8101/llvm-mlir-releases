@@ -84,7 +84,25 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1
         with:
           key: llvm-${{ matrix.platform }}-${{ steps.version.outputs.version }}
-          max-size: 2G
+          max-size: 5G
+
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          df -h
+
+      - name: Free disk space (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          df -h
 
       - name: Clone LLVM source
         run: |
@@ -132,7 +150,7 @@ jobs:
             -DLLVM_ENABLE_ZSTD=OFF
 
       - name: Build LLVM
-        run: cmake --build build --config Release -j 2
+        run: cmake --build build --config Release --parallel 4
 
       - name: Install LLVM
         run: cmake --install build --config Release
@@ -150,6 +168,13 @@ jobs:
         run: |
           Compress-Archive -Path install\* -DestinationPath llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.zip
 
+      - name: Generate checksum
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          ARCHIVE="llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}"
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+
       - name: Upload release assets
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
@@ -158,8 +183,9 @@ jobs:
         with:
           files: |
             llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
+            llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}.sha256
           tag_name: ${{ github.ref_name }}
-          name: "LLVM ${{ steps.version.outputs.version }}"
+          name: "LLVM + MLIR ${{ steps.version.outputs.version }}"
           draft: false
           prerelease: false
 
