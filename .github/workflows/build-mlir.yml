@@ -123,9 +123,6 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache ^
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache ^
             -DLLVM_ENABLE_PROJECTS="mlir" ^
-            -DLLVM_BUILD_LLVM_DYLIB=ON ^
-            -DLLVM_BUILD_LLVM_DYLIB_VIS=ON ^
-            -DLLVM_LINK_LLVM_DYLIB=ON ^
             -DMLIR_BUILD_MLIR_C_DYLIB=ON ^
             -DLLVM_TARGETS_TO_BUILD="all" ^
             -DLLVM_INCLUDE_TESTS=OFF ^
