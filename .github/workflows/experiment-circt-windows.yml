@@ -158,6 +158,23 @@ jobs:
         run: |
           git clone --recursive --depth 1 --shallow-submodules --branch ${{ steps.version.outputs.tag }} https://github.com/llvm/circt.git
 
+      # Patch: upstream LLVM bug — when LLVM_BUILD_LLVM_DYLIB=ON, ArmSMEStubs.cpp
+      # gets compiled into the monolithic DLL but the per-target export define
+      # (mlir_arm_sme_abi_stubs_EXPORTS) is never set, so the macro defaults to
+      # __declspec(dllimport) on function definitions, which is illegal.
+      # Fix: strip the MLIR_ARMSMEABISTUBS_EXPORTED macro from function definitions.
+      - name: Patch ArmSMEStubs.cpp (upstream dllimport bug)
+        shell: bash
+        run: |
+          STUBS_FILE="circt/llvm/mlir/lib/ExecutionEngine/ArmSMEStubs.cpp"
+          if [ -f "$STUBS_FILE" ]; then
+            echo "Patching $STUBS_FILE to fix dllimport on definitions..."
+            sed -i 's/MLIR_ARMSMEABISTUBS_EXPORTED //g' "$STUBS_FILE"
+            echo "Patch applied."
+          else
+            echo "ArmSMEStubs.cpp not found — skipping patch (may not be needed)."
+          fi
+
       # ========================================
       # CONFIGURE: per-toolchain CMake flags
       # All three attempt LLVM_BUILD_LLVM_DYLIB=ON to test shared DLL feasibility
