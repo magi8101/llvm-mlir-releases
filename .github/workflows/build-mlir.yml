@@ -28,16 +28,20 @@ jobs:
             archive_ext: zip
             cmake_generator: Ninja
             shell: cmd
+            parallel_jobs: 4
           - os: ubuntu-latest
             platform: linux-x64
             archive_ext: tar.gz
             cmake_generator: Ninja
             shell: bash
+            parallel_jobs: 4
           - os: macos-latest
             platform: macos-arm64
             archive_ext: tar.gz
             cmake_generator: Ninja
             shell: bash
+            # macOS M1 runner has only 7 GB RAM; limit parallelism to avoid OOM
+            parallel_jobs: 2
 
     runs-on: ${{ matrix.os }}
     defaults:
@@ -52,8 +56,11 @@ jobs:
         shell: bash
         run: |
           RAW="${{ env.MLIR_VERSION }}"
-          # Extract only the numeric semantic version (e.g. 18.1.8) using sed
           VERSION=$(echo "$RAW" | sed -E 's/^[a-zA-Z]+-v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Failed to extract valid version from '$RAW'. Expected format: llvm-vX.Y.Z or X.Y.Z"
+            exit 1
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building MLIR version: ${VERSION}"
 
@@ -88,20 +95,26 @@ jobs:
 
       - name: Free disk space (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /usr/local/share/boost || true
-          df -h
+        uses: jlumbroso/free-disk-space@v1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
 
       - name: Free disk space (macOS)
         if: runner.os == 'macOS'
         run: |
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /opt/ghc || true
+          sudo xcrun simctl delete all || true
+          sudo rm -rf /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform || true
+          sudo rm -rf /Applications/Xcode.app/Contents/Developer/Platforms/AppleTVOS.platform || true
+          sudo rm -rf /Applications/Xcode.app/Contents/Developer/Platforms/WatchOS.platform || true
+          brew cleanup --prune=all || true
           sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /usr/local/lib/android || true
           df -h
 
       - name: Clone LLVM source
@@ -129,6 +142,8 @@ jobs:
             -DLLVM_ENABLE_ZLIB=OFF \
             -DLLVM_ENABLE_ZSTD=OFF
 
+      # Windows: LLVM_BUILD_LLVM_DYLIB is not supported with the MSVC ABI.
+      # The Windows build produces static LLVM libraries; only the MLIR-C DLL is shared.
       - name: Configure MLIR (Windows)
         if: runner.os == 'Windows'
         run: |
@@ -152,7 +167,7 @@ jobs:
             -DLLVM_ENABLE_ZSTD=OFF
 
       - name: Build MLIR
-        run: cmake --build build --config Release --parallel 4
+        run: cmake --build build --config Release --parallel ${{ matrix.parallel_jobs }}
 
       - name: Install MLIR
         run: cmake --install build --config Release
@@ -175,7 +190,11 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           ARCHIVE="mlir-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}"
-          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          if command -v sha256sum &>/dev/null; then
+            sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          else
+            shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+          fi
 
       - name: Upload release assets
         if: github.ref_type == 'tag'

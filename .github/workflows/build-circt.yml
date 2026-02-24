@@ -1,13 +1,13 @@
-name: Build LLVM Shared Libraries
+name: Build CIRCT Libraries
 
 on:
   push:
     tags:
-      - "llvm-v*"
+      - "circt-v*"
   workflow_dispatch:
     inputs:
-      llvm_version:
-        description: "LLVM version tag (e.g., 18.1.8)"
+      circt_version:
+        description: "CIRCT firtool release tag (e.g., 1.140.0)"
         required: true
         type: string
 
@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 env:
-  LLVM_VERSION: ${{ inputs.llvm_version || github.ref_name }}
+  CIRCT_VERSION: ${{ inputs.circt_version || github.ref_name }}
 
 jobs:
   build:
@@ -23,12 +23,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            platform: windows-x64
-            archive_ext: zip
-            cmake_generator: Ninja
-            shell: cmd
-            parallel_jobs: 4
           - os: ubuntu-latest
             platform: linux-x64
             archive_ext: tar.gz
@@ -42,6 +36,14 @@ jobs:
             shell: bash
             # macOS M1 runner has only 7 GB RAM; limit parallelism to avoid OOM
             parallel_jobs: 2
+          # Windows: LLVM_BUILD_LLVM_DYLIB is not supported with the MSVC ABI.
+          # This entry produces a static CIRCT build (tools + static libs + headers).
+          - os: windows-latest
+            platform: windows-x64
+            archive_ext: zip
+            cmake_generator: Ninja
+            shell: cmd
+            parallel_jobs: 4
 
     runs-on: ${{ matrix.os }}
     defaults:
@@ -51,18 +53,19 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Derive LLVM version from tag
+      - name: Derive CIRCT version from tag
         id: version
         shell: bash
         run: |
-          RAW="${{ env.LLVM_VERSION }}"
+          RAW="${{ env.CIRCT_VERSION }}"
           VERSION=$(echo "$RAW" | sed -E 's/^[a-zA-Z]+-v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Failed to extract valid version from '$RAW'. Expected format: llvm-vX.Y.Z or X.Y.Z"
+            echo "::error::Failed to extract valid version from '$RAW'. Expected format: circt-vX.Y.Z or X.Y.Z"
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Building LLVM version: ${VERSION}"
+          echo "tag=firtool-${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building CIRCT version: ${VERSION}"
 
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
@@ -90,7 +93,7 @@ jobs:
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1
         with:
-          key: llvm-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          key: circt-${{ matrix.platform }}-${{ steps.version.outputs.version }}
           max-size: 5G
 
       - name: Free disk space (Linux)
@@ -117,22 +120,24 @@ jobs:
           sudo rm -rf /usr/local/lib/android || true
           df -h
 
-      - name: Clone LLVM source
+      - name: Clone CIRCT source
         run: |
-          git clone --depth 1 --branch llvmorg-${{ steps.version.outputs.version }} https://github.com/llvm/llvm-project.git
+          git clone --recursive --depth 1 --shallow-submodules --branch ${{ steps.version.outputs.tag }} https://github.com/llvm/circt.git
 
-      - name: Configure LLVM (Unix)
+      - name: Configure CIRCT (Unix)
         if: runner.os != 'Windows'
         run: |
-          cmake -G Ninja -S llvm-project/llvm -B build \
+          cmake -G Ninja -S circt/llvm/llvm -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DLLVM_ENABLE_PROJECTS="clang;lld;polly" \
+            -DLLVM_ENABLE_PROJECTS="mlir" \
+            -DLLVM_EXTERNAL_PROJECTS=circt \
+            -DLLVM_EXTERNAL_CIRCT_SOURCE_DIR=${{ github.workspace }}/circt \
             -DLLVM_BUILD_LLVM_DYLIB=ON \
             -DLLVM_LINK_LLVM_DYLIB=ON \
-            -DLLVM_TARGETS_TO_BUILD="all" \
+            -DLLVM_TARGETS_TO_BUILD="host" \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
@@ -142,11 +147,11 @@ jobs:
             -DLLVM_ENABLE_ZSTD=OFF
 
       # Windows: LLVM_BUILD_LLVM_DYLIB is not supported with the MSVC ABI.
-      # The Windows build produces static libraries instead of a unified libLLVM DLL.
-      - name: Configure LLVM (Windows)
+      # This produces static CIRCT/LLVM/MLIR libraries plus CIRCT tools.
+      - name: Configure CIRCT (Windows)
         if: runner.os == 'Windows'
         run: |
-          cmake -G Ninja -S llvm-project/llvm -B build ^
+          cmake -G Ninja -S circt/llvm/llvm -B build ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install ^
             -DCMAKE_C_COMPILER=clang-cl ^
@@ -154,8 +159,10 @@ jobs:
             -DLLVM_USE_LINKER=lld ^
             -DCMAKE_C_COMPILER_LAUNCHER=ccache ^
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache ^
-            -DLLVM_ENABLE_PROJECTS="clang;lld;polly" ^
-            -DLLVM_TARGETS_TO_BUILD="all" ^
+            -DLLVM_ENABLE_PROJECTS="mlir" ^
+            -DLLVM_EXTERNAL_PROJECTS=circt ^
+            -DLLVM_EXTERNAL_CIRCT_SOURCE_DIR=${{ github.workspace }}/circt ^
+            -DLLVM_TARGETS_TO_BUILD="host" ^
             -DLLVM_INCLUDE_TESTS=OFF ^
             -DLLVM_INCLUDE_EXAMPLES=OFF ^
             -DLLVM_INCLUDE_BENCHMARKS=OFF ^
@@ -164,30 +171,30 @@ jobs:
             -DLLVM_ENABLE_ZLIB=OFF ^
             -DLLVM_ENABLE_ZSTD=OFF
 
-      - name: Build LLVM
+      - name: Build CIRCT
         run: cmake --build build --config Release --parallel ${{ matrix.parallel_jobs }}
 
-      - name: Install LLVM
+      - name: Install CIRCT
         run: cmake --install build --config Release
 
       - name: Package archive (Unix tar.gz)
         if: runner.os != 'Windows'
         working-directory: ${{ github.workspace }}
         run: |
-          tar -czf llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz -C install .
+          tar -czf circt-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz -C install .
 
       - name: Package archive (Windows zip)
         if: runner.os == 'Windows'
         shell: powershell
         working-directory: ${{ github.workspace }}
         run: |
-          Compress-Archive -Path install\* -DestinationPath llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.zip
+          Compress-Archive -Path install\* -DestinationPath circt-${{ steps.version.outputs.version }}-${{ matrix.platform }}.zip
 
       - name: Generate checksum
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
-          ARCHIVE="llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}"
+          ARCHIVE="circt-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}"
           if command -v sha256sum &>/dev/null; then
             sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
           else
@@ -201,10 +208,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           files: |
-            llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
-            llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}.sha256
+            circt-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
+            circt-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}.sha256
           tag_name: ${{ github.ref_name }}
-          name: "LLVM + MLIR ${{ steps.version.outputs.version }}"
+          name: "CIRCT ${{ steps.version.outputs.version }}"
           draft: false
           prerelease: false
 
@@ -212,6 +219,6 @@ jobs:
         if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4
         with:
-          name: llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}
-          path: llvm-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
+          name: circt-${{ steps.version.outputs.version }}-${{ matrix.platform }}
+          path: circt-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
           retention-days: 7
