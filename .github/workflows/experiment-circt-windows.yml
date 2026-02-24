@@ -1,0 +1,258 @@
+name: "[Experimental] CIRCT Windows Toolchain Test"
+
+# Manual-trigger only — this is an experiment to find which Windows toolchain
+# can successfully build CIRCT, and whether shared libraries (DLLs) are possible.
+#
+# Matrix tests three toolchains:
+#   1. msvc       — cl.exe via Visual Studio, static libs only
+#   2. clang-cl   — Clang in MSVC-compat mode, static libs only
+#   3. mingw      — MSYS2 CLANG64 (Clang + MinGW), attempts LLVM_BUILD_LLVM_DYLIB (shared DLL)
+#
+# Each job logs configure/build/install output and uploads whatever it produces.
+# Compare the three to decide which goes into the real build-circt.yml.
+
+on:
+  push:
+    tags:
+      - "circt-exp-v*"
+  workflow_dispatch:
+    inputs:
+      circt_version:
+        description: "CIRCT firtool release tag (e.g., 1.140.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CIRCT_VERSION: ${{ inputs.circt_version || github.ref_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- Toolchain 1: Plain MSVC (cl.exe) ---
+          - toolchain: msvc
+            os: windows-latest
+            shell: cmd
+            parallel_jobs: 4
+
+          # --- Toolchain 2: clang-cl (MSVC ABI) ---
+          - toolchain: clang-cl
+            os: windows-latest
+            shell: cmd
+            parallel_jobs: 4
+
+          # --- Toolchain 3: MinGW via MSYS2 CLANG64 ---
+          # This is the only one that might produce a shared libLLVM.dll
+          - toolchain: mingw
+            os: windows-latest
+            shell: msys2 {0}
+            parallel_jobs: 4
+
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    timeout-minutes: 360
+
+    steps:
+      - name: Derive CIRCT version
+        id: version
+        shell: bash
+        run: |
+          RAW="${{ env.CIRCT_VERSION }}"
+          VERSION=$(echo "$RAW" | sed -E 's/^[a-zA-Z]+-v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Failed to extract valid version from '$RAW'. Expected X.Y.Z"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=firtool-${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Testing CIRCT ${VERSION} with toolchain: ${{ matrix.toolchain }}"
+
+      # ========================================
+      # TOOLCHAIN SETUP: MSVC
+      # ========================================
+      - name: "[msvc] Set up MSVC environment"
+        if: matrix.toolchain == 'msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: "[msvc] Install Ninja"
+        if: matrix.toolchain == 'msvc'
+        shell: powershell
+        run: choco install ninja -y
+
+      # ========================================
+      # TOOLCHAIN SETUP: clang-cl
+      # ========================================
+      - name: "[clang-cl] Set up MSVC environment"
+        if: matrix.toolchain == 'clang-cl'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: "[clang-cl] Install tools"
+        if: matrix.toolchain == 'clang-cl'
+        shell: powershell
+        run: choco install ninja llvm -y
+
+      # ========================================
+      # TOOLCHAIN SETUP: MinGW (MSYS2 CLANG64)
+      # ========================================
+      - name: "[mingw] Set up MSYS2"
+        if: matrix.toolchain == 'mingw'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-lld
+            git
+
+      # ========================================
+      # COMMON STEPS
+      # ========================================
+      - name: Free disk space
+        shell: powershell
+        run: |
+          Remove-Item -Recurse -Force "C:\Program Files\dotnet" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files (x86)\Microsoft SDKs\Azure" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\hostedtoolcache" -ErrorAction SilentlyContinue
+          Get-PSDrive C | Select-Object Used, Free
+
+      - name: Clone CIRCT source
+        shell: bash
+        run: |
+          git clone --recursive --depth 1 --shallow-submodules --branch ${{ steps.version.outputs.tag }} https://github.com/llvm/circt.git
+
+      # ========================================
+      # CONFIGURE: per-toolchain CMake flags
+      # ========================================
+      - name: "[msvc] Configure CIRCT (static, cl.exe)"
+        if: matrix.toolchain == 'msvc'
+        run: |
+          cmake -G Ninja -S circt/llvm/llvm -B build ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install ^
+            -DLLVM_ENABLE_PROJECTS="mlir" ^
+            -DLLVM_EXTERNAL_PROJECTS=circt ^
+            -DLLVM_EXTERNAL_CIRCT_SOURCE_DIR=${{ github.workspace }}/circt ^
+            -DLLVM_TARGETS_TO_BUILD="host" ^
+            -DLLVM_INCLUDE_TESTS=OFF ^
+            -DLLVM_INCLUDE_EXAMPLES=OFF ^
+            -DLLVM_INCLUDE_BENCHMARKS=OFF ^
+            -DLLVM_INCLUDE_DOCS=OFF ^
+            -DLLVM_ENABLE_ASSERTIONS=OFF ^
+            -DLLVM_ENABLE_ZLIB=OFF ^
+            -DLLVM_ENABLE_ZSTD=OFF
+
+      - name: "[clang-cl] Configure CIRCT (static, clang-cl + lld)"
+        if: matrix.toolchain == 'clang-cl'
+        run: |
+          cmake -G Ninja -S circt/llvm/llvm -B build ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install ^
+            -DCMAKE_C_COMPILER=clang-cl ^
+            -DCMAKE_CXX_COMPILER=clang-cl ^
+            -DLLVM_USE_LINKER=lld ^
+            -DLLVM_ENABLE_PROJECTS="mlir" ^
+            -DLLVM_EXTERNAL_PROJECTS=circt ^
+            -DLLVM_EXTERNAL_CIRCT_SOURCE_DIR=${{ github.workspace }}/circt ^
+            -DLLVM_TARGETS_TO_BUILD="host" ^
+            -DLLVM_INCLUDE_TESTS=OFF ^
+            -DLLVM_INCLUDE_EXAMPLES=OFF ^
+            -DLLVM_INCLUDE_BENCHMARKS=OFF ^
+            -DLLVM_INCLUDE_DOCS=OFF ^
+            -DLLVM_ENABLE_ASSERTIONS=OFF ^
+            -DLLVM_ENABLE_ZLIB=OFF ^
+            -DLLVM_ENABLE_ZSTD=OFF
+
+      - name: "[mingw] Configure CIRCT (shared DLL attempt, MSYS2 CLANG64)"
+        if: matrix.toolchain == 'mingw'
+        run: |
+          cmake -G Ninja -S circt/llvm/llvm -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install \
+            -DLLVM_ENABLE_PROJECTS="mlir" \
+            -DLLVM_EXTERNAL_PROJECTS=circt \
+            -DLLVM_EXTERNAL_CIRCT_SOURCE_DIR=${{ github.workspace }}/circt \
+            -DLLVM_BUILD_LLVM_DYLIB=ON \
+            -DLLVM_LINK_LLVM_DYLIB=ON \
+            -DLLVM_TARGETS_TO_BUILD="host" \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF
+
+      - name: Build CIRCT
+        run: cmake --build build --config Release --parallel ${{ matrix.parallel_jobs }}
+
+      - name: Install CIRCT
+        run: cmake --install build --config Release
+
+      # ========================================
+      # VALIDATION: check what was produced
+      # ========================================
+      - name: List installed binaries
+        shell: bash
+        run: |
+          echo "=== bin/ ==="
+          ls -la install/bin/ 2>/dev/null | head -30 || echo "No bin directory"
+          echo ""
+          echo "=== lib/ (DLLs and shared libs) ==="
+          find install/lib/ -name "*.dll" -o -name "*.so" -o -name "*.dylib" 2>/dev/null | head -20 || echo "No shared libs found"
+          echo ""
+          echo "=== lib/ (static libs) ==="
+          find install/lib/ -name "*.lib" -o -name "*.a" 2>/dev/null | wc -l || echo "0"
+          echo " static library files"
+          echo ""
+          echo "=== Disk usage ==="
+          du -sh install/ 2>/dev/null || echo "No install dir"
+
+      - name: Test firtool runs
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "Testing firtool --version..."
+          install/bin/firtool --version 2>&1 || echo "firtool not found or failed"
+          echo ""
+          echo "Testing circt-opt --version..."
+          install/bin/circt-opt --version 2>&1 || echo "circt-opt not found or failed"
+
+      - name: Package results
+        shell: powershell
+        run: |
+          Compress-Archive -Path install\* -DestinationPath "circt-${{ steps.version.outputs.version }}-windows-x64-${{ matrix.toolchain }}.zip"
+
+      - name: Upload release assets
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: circt-${{ steps.version.outputs.version }}-windows-x64-${{ matrix.toolchain }}.zip
+          tag_name: ${{ github.ref_name }}
+          name: "[Experiment] CIRCT ${{ steps.version.outputs.version }} Windows Toolchain Test"
+          draft: false
+          prerelease: true
+
+      - name: Upload artifact (manual dispatch)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: circt-${{ steps.version.outputs.version }}-windows-${{ matrix.toolchain }}
+          path: circt-${{ steps.version.outputs.version }}-windows-x64-${{ matrix.toolchain }}.zip
+          retention-days: 7
