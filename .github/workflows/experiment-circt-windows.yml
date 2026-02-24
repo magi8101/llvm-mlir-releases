@@ -66,7 +66,7 @@ jobs:
         shell: bash
         run: |
           RAW="${{ env.CIRCT_VERSION }}"
-          VERSION=$(echo "$RAW" | sed -E 's/^[a-zA-Z]+-v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          VERSION=$(echo "$RAW" | sed -E 's/^.*-v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Failed to extract valid version from '$RAW'. Expected X.Y.Z"
             exit 1
