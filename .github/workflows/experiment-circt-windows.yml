@@ -1,15 +1,18 @@
 name: "[Experimental] CIRCT Windows Toolchain Test"
 
 # Manual-trigger only — this is an experiment to find which Windows toolchain
-# can successfully build CIRCT, and whether shared libraries (DLLs) are possible.
+# can successfully build CIRCT with shared libraries (DLLs).
 #
 # Matrix tests three toolchains:
-#   1. msvc       — cl.exe via Visual Studio, static libs only
-#   2. clang-cl   — Clang in MSVC-compat mode, static libs only
-#   3. mingw      — MSYS2 CLANG64 (Clang + MinGW), attempts LLVM_BUILD_LLVM_DYLIB (shared DLL)
+#   1. msvc       — cl.exe via Visual Studio, LLVM_BUILD_LLVM_DYLIB=ON
+#   2. clang-cl   — Clang in MSVC-compat mode, LLVM_BUILD_LLVM_DYLIB=ON
+#   3. mingw      — MSYS2 CLANG64 (Clang + MinGW), LLVM_BUILD_LLVM_DYLIB=ON
 #
-# Each job logs configure/build/install output and uploads whatever it produces.
+# fail-fast: false ensures each job runs independently.
 # Compare the three to decide which goes into the real build-circt.yml.
+#
+# Required build deps: Python 3, Ninja, CMake 3.20+, C++ compiler
+# Optional deps (Verilator, Vivado, z3, etc.) auto-skip if not found.
 
 on:
   push:
@@ -76,6 +79,33 @@ jobs:
           echo "Testing CIRCT ${VERSION} with toolchain: ${{ matrix.toolchain }}"
 
       # ========================================
+      # COMMON: Python 3 (required by LLVM/CIRCT tablegen)
+      # ========================================
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ========================================
+      # COMMON: Free disk space (Windows runners have ~14 GB free)
+      # ========================================
+      - name: Free disk space
+        shell: powershell
+        run: |
+          # Remove large pre-installed components to free ~10-15 GB
+          Remove-Item -Recurse -Force "C:\Program Files\dotnet" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files (x86)\Microsoft SDKs\Azure" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\hostedtoolcache" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files\MongoDB" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files\PostgreSQL" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files\MySQL" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\imagegeneration\installers" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Selenium" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files (x86)\Google" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files\Google" -ErrorAction SilentlyContinue
+          Get-PSDrive C | Select-Object Used, Free
+
+      # ========================================
       # TOOLCHAIN SETUP: MSVC
       # ========================================
       - name: "[msvc] Set up MSVC environment"
@@ -117,19 +147,12 @@ jobs:
             mingw-w64-clang-x86_64-cmake
             mingw-w64-clang-x86_64-ninja
             mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-python
             git
 
       # ========================================
-      # COMMON STEPS
+      # CLONE
       # ========================================
-      - name: Free disk space
-        shell: powershell
-        run: |
-          Remove-Item -Recurse -Force "C:\Program Files\dotnet" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "C:\Program Files (x86)\Microsoft SDKs\Azure" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "C:\hostedtoolcache" -ErrorAction SilentlyContinue
-          Get-PSDrive C | Select-Object Used, Free
-
       - name: Clone CIRCT source
         shell: bash
         run: |
@@ -137,6 +160,7 @@ jobs:
 
       # ========================================
       # CONFIGURE: per-toolchain CMake flags
+      # All three attempt LLVM_BUILD_LLVM_DYLIB=ON to test shared DLL feasibility
       # ========================================
       - name: "[msvc] Configure CIRCT (shared DLL attempt, cl.exe)"
         if: matrix.toolchain == 'msvc'
