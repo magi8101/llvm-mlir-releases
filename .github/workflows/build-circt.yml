@@ -162,6 +162,7 @@ jobs:
             -DCMAKE_C_COMPILER=clang-cl ^
             -DCMAKE_CXX_COMPILER=clang-cl ^
             -DLLVM_USE_LINKER=lld ^
+            -DPython3_EXECUTABLE="${{ env.pythonLocation }}/python.exe" ^
             -DCMAKE_C_COMPILER_LAUNCHER=ccache ^
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache ^
             -DLLVM_ENABLE_PROJECTS="mlir" ^

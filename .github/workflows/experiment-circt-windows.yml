@@ -168,6 +168,7 @@ jobs:
           cmake -G Ninja -S circt/llvm/llvm -B build ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install ^
+            -DPython3_EXECUTABLE="${{ env.pythonLocation }}/python.exe" ^
             -DLLVM_ENABLE_PROJECTS="mlir" ^
             -DLLVM_EXTERNAL_PROJECTS=circt ^
             -DLLVM_EXTERNAL_CIRCT_SOURCE_DIR=${{ github.workspace }}/circt ^
@@ -191,6 +192,7 @@ jobs:
             -DCMAKE_C_COMPILER=clang-cl ^
             -DCMAKE_CXX_COMPILER=clang-cl ^
             -DLLVM_USE_LINKER=lld ^
+            -DPython3_EXECUTABLE="${{ env.pythonLocation }}/python.exe" ^
             -DLLVM_ENABLE_PROJECTS="mlir" ^
             -DLLVM_EXTERNAL_PROJECTS=circt ^
             -DLLVM_EXTERNAL_CIRCT_SOURCE_DIR=${{ github.workspace }}/circt ^
@@ -205,6 +207,7 @@ jobs:
             -DLLVM_ENABLE_ZLIB=OFF ^
             -DLLVM_ENABLE_ZSTD=OFF
 
+      # MinGW uses MSYS2's own Python, does not need pythonLocation from setup-python
       - name: "[mingw] Configure CIRCT (shared DLL attempt, MSYS2 CLANG64)"
         if: matrix.toolchain == 'mingw'
         run: |
