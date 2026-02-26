@@ -79,15 +79,10 @@ jobs:
           echo "Testing CIRCT ${VERSION} with toolchain: ${{ matrix.toolchain }}"
 
       # ========================================
-      # COMMON: Python 3 (required by LLVM/CIRCT tablegen)
-      # ========================================
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      # ========================================
       # COMMON: Free disk space (Windows runners have ~14 GB free)
+      # NOTE: Must run BEFORE setup-python — this step deletes C:\hostedtoolcache,
+      # which is where setup-python installs Python. If setup-python runs first,
+      # the Python install gets wiped and CMake cannot find it.
       # ========================================
       - name: Free disk space
         shell: powershell
@@ -104,6 +99,15 @@ jobs:
           Remove-Item -Recurse -Force "C:\Program Files (x86)\Google" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "C:\Program Files\Google" -ErrorAction SilentlyContinue
           Get-PSDrive C | Select-Object Used, Free
+
+      # ========================================
+      # COMMON: Python 3 (required by LLVM/CIRCT tablegen)
+      # Must run AFTER Free disk space (see note above).
+      # ========================================
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       # ========================================
       # TOOLCHAIN SETUP: MSVC
@@ -175,6 +179,38 @@ jobs:
             echo "ArmSMEStubs.cpp not found — skipping patch (may not be needed)."
           fi
 
+      # Patch: upstream LLVM/MLIR bug (mingw only) — mlir-irdl-to-cpp's CMakeLists.txt
+      # does not declare all of its transitive MLIR dependencies (MLIRFunctionInterfaces,
+      # MLIRIR, MLIRParser, MLIRSupport, MLIRTranslateLib). When tools are NOT forced to
+      # link the monolithic MLIR dylib (LLVM_LINK_LLVM_DYLIB=OFF for mingw), the linker
+      # cannot resolve these symbols from the per-component static archives.
+      # Fix: append the missing target_link_libraries call after the existing add_mlir_tool.
+      - name: "[mingw] Patch mlir-irdl-to-cpp CMakeLists (missing link deps)"
+        if: matrix.toolchain == 'mingw'
+        shell: bash
+        run: |
+          CMAKE_FILE="circt/llvm/mlir/tools/mlir-irdl-to-cpp/CMakeLists.txt"
+          if [ -f "$CMAKE_FILE" ]; then
+            echo "Patching $CMAKE_FILE to add missing MLIR link dependencies..."
+            cat >> "$CMAKE_FILE" << 'EOF'
+
+# Workflow patch: add missing transitive MLIR deps for MinGW static link builds.
+# See: https://github.com/llvm/llvm-project/issues (upstream CMakeLists omits these).
+target_link_libraries(mlir-irdl-to-cpp
+  PRIVATE
+    MLIRIR
+    MLIRParser
+    MLIRSupport
+    MLIRFunctionInterfaces
+    MLIRTranslateLib
+    MLIRIRDLTransforms
+)
+EOF
+            echo "Patch applied."
+          else
+            echo "mlir-irdl-to-cpp/CMakeLists.txt not found — skipping patch."
+          fi
+
       # ========================================
       # CONFIGURE: per-toolchain CMake flags
       # All three attempt LLVM_BUILD_LLVM_DYLIB=ON to test shared DLL feasibility
@@ -224,7 +260,16 @@ jobs:
             -DLLVM_ENABLE_ZLIB=OFF ^
             -DLLVM_ENABLE_ZSTD=OFF
 
-      # MinGW uses MSYS2's own Python, does not need pythonLocation from setup-python
+      # MinGW uses MSYS2's own Python, does not need pythonLocation from setup-python.
+      #
+      # Note on LLVM_LINK_LLVM_DYLIB: intentionally NOT set for MinGW.
+      # LLVM_BUILD_LLVM_DYLIB=ON is enough to build libLLVM.dll (the experiment goal).
+      # LLVM_LINK_LLVM_DYLIB=ON would additionally force every tool to prefer the shared
+      # dylib over static libs — this triggers the upstream mlir-irdl-to-cpp CMakeLists
+      # bug (missing transitive deps) even after our patch, because the static-lib
+      # fallback is needed to cleanly resolve all symbols on MinGW.
+      # With LLVM_BUILD_LLVM_DYLIB=ON only: DLL is built and inspectable, tools still
+      # link cleanly against static component libs.
       - name: "[mingw] Configure CIRCT (shared DLL attempt, MSYS2 CLANG64)"
         if: matrix.toolchain == 'mingw'
         run: |
@@ -235,7 +280,7 @@ jobs:
             -DLLVM_EXTERNAL_PROJECTS=circt \
             -DLLVM_EXTERNAL_CIRCT_SOURCE_DIR=${{ github.workspace }}/circt \
             -DLLVM_BUILD_LLVM_DYLIB=ON \
-            -DLLVM_LINK_LLVM_DYLIB=ON \
+            -DMLIR_BUILD_MLIR_C_DYLIB=ON \
             -DLLVM_TARGETS_TO_BUILD="host" \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
@@ -245,7 +290,11 @@ jobs:
             -DLLVM_ENABLE_ZLIB=OFF \
             -DLLVM_ENABLE_ZSTD=OFF
 
+      # continue-on-error: allows the validation steps to still run and report
+      # which DLLs/tools were produced, even if a minority of tools fail to link
+      # (particularly relevant for the mingw toolchain during experimentation).
       - name: Build CIRCT
+        continue-on-error: ${{ matrix.toolchain == 'mingw' }}
         run: cmake --build build --config Release --parallel ${{ matrix.parallel_jobs }}
 
       - name: Install CIRCT
