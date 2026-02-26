@@ -194,18 +194,18 @@ jobs:
             echo "Patching $CMAKE_FILE to add missing MLIR link dependencies..."
             cat >> "$CMAKE_FILE" << 'EOF'
 
-# Workflow patch: add missing transitive MLIR deps for MinGW static link builds.
-# See: https://github.com/llvm/llvm-project/issues (upstream CMakeLists omits these).
-target_link_libraries(mlir-irdl-to-cpp
-  PRIVATE
-    MLIRIR
-    MLIRParser
-    MLIRSupport
-    MLIRFunctionInterfaces
-    MLIRTranslateLib
-    MLIRIRDLTransforms
-)
-EOF
+          # Workflow patch: add missing transitive MLIR deps for MinGW static link builds.
+          # See: https://github.com/llvm/llvm-project/issues (upstream CMakeLists omits these).
+          target_link_libraries(mlir-irdl-to-cpp
+            PRIVATE
+              MLIRIR
+              MLIRParser
+              MLIRSupport
+              MLIRFunctionInterfaces
+              MLIRTranslateLib
+              MLIRIRDLTransforms
+          )
+          EOF
             echo "Patch applied."
           else
             echo "mlir-irdl-to-cpp/CMakeLists.txt not found — skipping patch."
