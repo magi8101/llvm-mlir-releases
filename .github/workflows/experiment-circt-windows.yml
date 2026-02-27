@@ -179,36 +179,93 @@ jobs:
             echo "ArmSMEStubs.cpp not found — skipping patch (may not be needed)."
           fi
 
-      # Patch: upstream LLVM/MLIR bug (mingw only) — mlir-irdl-to-cpp's CMakeLists.txt
-      # does not declare all of its transitive MLIR dependencies (MLIRFunctionInterfaces,
-      # MLIRIR, MLIRParser, MLIRSupport, MLIRTranslateLib). When tools are NOT forced to
-      # link the monolithic MLIR dylib (LLVM_LINK_LLVM_DYLIB=OFF for mingw), the linker
-      # cannot resolve these symbols from the per-component static archives.
-      # Fix: append the missing target_link_libraries call after the existing add_mlir_tool.
-      - name: "[mingw] Patch mlir-irdl-to-cpp CMakeLists (missing link deps)"
+      # Patch: upstream CIRCT bug — ESIServices.cpp calls ServiceImplRecordOp::create()
+      # passing UnitAttr() for the 'isEngine' parameter. Clang (clang-cl and clang) cannot
+      # resolve which create() overload to use because UnitAttr() is implicitly convertible
+      # to multiple Attribute-derived types. MSVC is permissive and resolves it silently;
+      # Clang is strict and emits "call to 'create' is ambiguous".
+      # Fix: qualify the argument as mlir::UnitAttr{} so the overload is unambiguous.
+      - name: "[clang-cl] Patch ESIServices.cpp (ambiguous UnitAttr create overload)"
+        if: matrix.toolchain == 'clang-cl'
+        shell: bash
+        run: |
+          ESI_FILE="circt/lib/Dialect/ESI/ESIServices.cpp"
+          if [ -f "$ESI_FILE" ]; then
+            echo "Patching $ESI_FILE to resolve ambiguous ServiceImplRecordOp::create call..."
+            # Replace UnitAttr() with mlir::UnitAttr{} to make clang's overload
+            # resolution unambiguous. The cast forces the argument to the exact
+            # mlir::UnitAttr type rather than leaving it as an implicit conversion candidate.
+            sed -i 's|/\*isEngine=\*/UnitAttr()|/*isEngine=*/mlir::UnitAttr{}|g' "$ESI_FILE"
+            echo "Patch applied."
+            grep -n 'isEngine' "$ESI_FILE" || echo "(no isEngine occurrences found after patch)"
+          else
+            echo "ESIServices.cpp not found — skipping patch."
+          fi
+
+      # Patch: upstream LLVM/MLIR bug (mingw only) — mlir-irdl-to-cpp links only against
+      # MLIRTargetIRDLToCpp via mlir_target_link_libraries(), but that helper does NOT
+      # automatically propagate transitive static deps on MinGW (where LLVM_LINK_LLVM_DYLIB
+      # is OFF). The linker therefore cannot find symbols from MLIRIR, MLIRSupport, etc.
+      # Fix: append an explicit target_link_libraries with all transitive deps that
+      # MLIRTargetIRDLToCpp requires when linked statically.
+      - name: "[mingw] Patch mlir-irdl-to-cpp CMakeLists (missing transitive static deps)"
         if: matrix.toolchain == 'mingw'
         shell: bash
         run: |
           CMAKE_FILE="circt/llvm/mlir/tools/mlir-irdl-to-cpp/CMakeLists.txt"
           if [ -f "$CMAKE_FILE" ]; then
-            echo "Patching $CMAKE_FILE to add missing MLIR link dependencies..."
+            echo "Patching $CMAKE_FILE to add missing transitive link dependencies..."
             cat >> "$CMAKE_FILE" << 'EOF'
 
-          # Workflow patch: add missing transitive MLIR deps for MinGW static link builds.
-          # See: https://github.com/llvm/llvm-project/issues (upstream CMakeLists omits these).
-          target_link_libraries(mlir-irdl-to-cpp
-            PRIVATE
-              MLIRIR
-              MLIRParser
-              MLIRSupport
-              MLIRFunctionInterfaces
-              MLIRTranslateLib
-              MLIRIRDLTransforms
-          )
-          EOF
+# Workflow patch: explicit transitive deps for MinGW static link builds.
+# mlir_target_link_libraries does not propagate transitive static archives
+# on MinGW when LLVM_LINK_LLVM_DYLIB=OFF. List them explicitly here.
+target_link_libraries(mlir-irdl-to-cpp
+  PRIVATE
+    MLIRIR
+    MLIRParser
+    MLIRSupport
+    MLIRBytecodeReader
+    MLIRIRDLToLLVMIRTranslation
+    MLIRTranslateLib
+    MLIRFunctionInterfaces
+    MLIRTargetIRDLToCpp
+)
+EOF
             echo "Patch applied."
           else
             echo "mlir-irdl-to-cpp/CMakeLists.txt not found — skipping patch."
+          fi
+
+      # Patch: upstream LLVM/MLIR bug (mingw only) — mlir-pdll fails to link because
+      # add_tablegen() does not pull in all transitive deps of MLIRPDLLODS and
+      # MLIRPDLLCodeGen under MinGW's static link model.
+      # Fix: append explicit target_link_libraries covering the missing symbols.
+      - name: "[mingw] Patch mlir-pdll CMakeLists (missing transitive static deps)"
+        if: matrix.toolchain == 'mingw'
+        shell: bash
+        run: |
+          PDLL_FILE="circt/llvm/mlir/tools/mlir-pdll/CMakeLists.txt"
+          if [ -f "$PDLL_FILE" ]; then
+            echo "Patching $PDLL_FILE to add missing transitive link dependencies..."
+            cat >> "$PDLL_FILE" << 'EOF'
+
+# Workflow patch: explicit transitive deps for MinGW static link builds.
+target_link_libraries(mlir-pdll
+  PRIVATE
+    MLIRIR
+    MLIRSupport
+    MLIRParser
+    MLIRPDLLCodeGen
+    MLIRPDLLAST
+    MLIRPDLLODS
+    MLIRPDLLParser
+    MLIRSideEffectInterfaces
+)
+EOF
+            echo "Patch applied."
+          else
+            echo "mlir-pdll/CMakeLists.txt not found — skipping patch."
           fi
 
       # ========================================
@@ -330,9 +387,9 @@ jobs:
           install/bin/circt-opt --version 2>&1 || echo "circt-opt not found or failed"
 
       - name: Package results
-        shell: powershell
+        shell: bash
         run: |
-          Compress-Archive -Path install\* -DestinationPath "circt-${{ steps.version.outputs.version }}-windows-x64-${{ matrix.toolchain }}.zip"
+          tar -czf "circt-${{ steps.version.outputs.version }}-windows-x64-${{ matrix.toolchain }}.tar.gz" -C install .
 
       - name: Upload release assets
         if: github.ref_type == 'tag'
@@ -340,7 +397,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          files: circt-${{ steps.version.outputs.version }}-windows-x64-${{ matrix.toolchain }}.zip
+          files: circt-${{ steps.version.outputs.version }}-windows-x64-${{ matrix.toolchain }}.tar.gz
           tag_name: ${{ github.ref_name }}
           name: "[Experiment] CIRCT ${{ steps.version.outputs.version }} Windows Toolchain Test"
           draft: false
@@ -351,5 +408,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: circt-${{ steps.version.outputs.version }}-windows-${{ matrix.toolchain }}
-          path: circt-${{ steps.version.outputs.version }}-windows-x64-${{ matrix.toolchain }}.zip
+          path: circt-${{ steps.version.outputs.version }}-windows-x64-${{ matrix.toolchain }}.tar.gz
           retention-days: 7
