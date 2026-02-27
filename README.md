@@ -1,10 +1,10 @@
 # llvm-mlir-releases
 
-Automated, pre-built LLVM, Clang, MLIR, and CIRCT libraries distributed via GitHub Releases.
+Automated, pre-built LLVM, Clang, MLIR, CIRCT, and libuv libraries distributed via GitHub Releases.
 
 ## What This Provides
 
-This repository builds three separate sets of pre-compiled libraries from the official LLVM ecosystem sources, using GitHub Actions.
+This repository builds pre-compiled libraries from official sources using GitHub Actions.
 
 1. **LLVM Release** (e.g., `llvm-18.1.8-<platform>`)
    - **Linux & macOS**: A unified `libLLVM.so` / `libLLVM.dylib` shared library containing all LLVM components.
@@ -21,6 +21,11 @@ This repository builds three separate sets of pre-compiled libraries from the of
    - **Linux & macOS**: Shared LLVM dylib with host-architecture targets.
    - **Windows**: Static libraries built with `clang-cl` (same MSVC ABI limitation as LLVM).
    - Versioned independently from LLVM using CIRCT's `firtool-X.Y.Z` release tags.
+
+4. **libuv Release** (e.g., `libuv-1.52.0-<platform>`)
+   - libuv shared library (`uv.dll` / `libuv.so` / `libuv.dylib`) on all three platforms.
+   - Unlike LLVM, Windows produces a proper DLL — no static fallback needed.
+   - Includes both the shared library (`uv`) and the static library (`uv_a`), plus all headers and CMake config files.
 
 ## Supported Platforms
 
@@ -44,11 +49,22 @@ Compiled for **host architecture only** (CIRCT does hardware IR transforms, not 
 | macOS ARM64 | AppleClang | Shared (`libLLVM.dylib`) | `.tar.gz` |
 | Windows x64 | clang-cl (MSVC ABI) | Static | `.zip` |
 
+### libuv
+
+Shared library on all platforms — MSVC ABI supports libuv DLLs natively:
+
+| OS Platform | Compiler | Library Type | Archive |
+|-------------|----------|-------------|---------|
+| Ubuntu x64  | GCC | Shared (`libuv.so`) | `.tar.gz` |
+| macOS ARM64 | AppleClang | Shared (`libuv.dylib`) | `.tar.gz` |
+| Windows x64 | MSVC (cl.exe) | Shared (`uv.dll` + `uv.lib`) | `.zip` |
+
 ## Release Naming & Triggers
 
 Releases are triggered automatically when tags are pushed:
 - **LLVM + MLIR**: Push `llvm-v18.1.8` → both workflows run, attach output to the same Release.
 - **CIRCT**: Push `circt-v1.140.0` → CIRCT workflow runs with its own Release page.
+- **libuv**: Push `libuv-v1.52.0` → libuv workflow runs with its own Release page.
 
 All workflows also support `workflow_dispatch` for manual builds with a version input.
 
@@ -62,6 +78,14 @@ cmake -DMLIR_DIR=/path/to/extracted/lib/cmake/mlir ..
 
 find_package(LLVM REQUIRED CONFIG)
 find_package(MLIR REQUIRED CONFIG)
+```
+
+For libuv:
+```cmake
+cmake -Dlibuv_DIR=/path/to/extracted/lib/cmake/libuv ..
+
+find_package(libuv REQUIRED CONFIG)
+target_link_libraries(my_target PRIVATE libuv::libuv)
 ```
 
 ## Local Build Reproduction
@@ -119,6 +143,17 @@ cmake -G Ninja -S circt/llvm/llvm -B build ^
   -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_DOCS=OFF
 ```
 
+### libuv (all platforms)
+```bash
+cmake -G Ninja -S libuv -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLIBUV_BUILD_SHARED=ON \
+  -DBUILD_TESTING=OFF
+```
+
+Windows: same command with `^` line continuations. MSVC produces `uv.dll` + `uv.lib` without any special flags.
+
 ## License
 
 The LLVM, MLIR, and CIRCT libraries are distributed under the [Apache License v2.0 with LLVM Exceptions](https://llvm.org/LICENSE.txt).
+libuv is distributed under the [MIT License](https://github.com/libuv/libuv/blob/v1.x/LICENSE).
