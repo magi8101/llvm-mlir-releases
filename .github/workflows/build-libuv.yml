@@ -1,0 +1,172 @@
+name: Build libuv Shared Library
+
+on:
+  push:
+    tags:
+      - "libuv-v*"
+  workflow_dispatch:
+    inputs:
+      libuv_version:
+        description: "libuv version tag (e.g., 1.52.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  LIBUV_VERSION: ${{ inputs.libuv_version || github.ref_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            archive_ext: zip
+            shell: cmd
+            parallel_jobs: 4
+          - os: ubuntu-latest
+            platform: linux-x64
+            archive_ext: tar.gz
+            shell: bash
+            parallel_jobs: 4
+          - os: macos-latest
+            platform: macos-arm64
+            archive_ext: tar.gz
+            shell: bash
+            # macOS M1 runner has only 7 GB RAM; limit parallelism to avoid OOM
+            parallel_jobs: 2
+
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    timeout-minutes: 30
+
+    steps:
+      - name: Derive libuv version from tag
+        id: version
+        shell: bash
+        run: |
+          RAW="${{ env.LIBUV_VERSION }}"
+          VERSION=$(echo "$RAW" | sed -E 's/^[a-zA-Z]+-v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Failed to extract valid version from '$RAW'. Expected format: libuv-vX.Y.Z or X.Y.Z"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building libuv version: ${VERSION}"
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja ccache
+
+      - name: Set up MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install build tools (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          choco install ninja ccache -y
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: libuv-${{ matrix.platform }}-${{ steps.version.outputs.version }}
+          max-size: 500M
+
+      - name: Clone libuv source
+        run: |
+          git clone --depth 1 --branch v${{ steps.version.outputs.version }} https://github.com/libuv/libuv.git
+
+      # libuv's own LIBUV_BUILD_SHARED flag controls the shared library target (uv).
+      # BUILD_TESTING=OFF suppresses the unit test and benchmark targets.
+      # The static library (uv_a) is always built and installed alongside the shared lib.
+      - name: Configure libuv (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cmake -G Ninja -S libuv -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DLIBUV_BUILD_SHARED=ON \
+            -DBUILD_TESTING=OFF
+
+      # Windows: MSVC ABI supports shared libraries for libuv natively.
+      # uv.dll + uv.lib (import lib) are produced and installed to bin/ and lib/.
+      - name: Configure libuv (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake -G Ninja -S libuv -B build ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install ^
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache ^
+            -DLIBUV_BUILD_SHARED=ON ^
+            -DBUILD_TESTING=OFF
+
+      - name: Build libuv
+        run: cmake --build build --config Release --parallel ${{ matrix.parallel_jobs }}
+
+      - name: Install libuv
+        run: cmake --install build --config Release
+
+      - name: Package archive (Unix tar.gz)
+        if: runner.os != 'Windows'
+        working-directory: ${{ github.workspace }}
+        run: |
+          tar -czf libuv-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.gz -C install .
+
+      - name: Package archive (Windows zip)
+        if: runner.os == 'Windows'
+        shell: powershell
+        working-directory: ${{ github.workspace }}
+        run: |
+          Compress-Archive -Path install\* -DestinationPath libuv-${{ steps.version.outputs.version }}-${{ matrix.platform }}.zip
+
+      - name: Generate checksum
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          ARCHIVE="libuv-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}"
+          if command -v sha256sum &>/dev/null; then
+            sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          else
+            shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+          fi
+
+      - name: Upload release assets
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: |
+            libuv-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
+            libuv-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}.sha256
+          tag_name: ${{ github.ref_name }}
+          name: "libuv ${{ steps.version.outputs.version }}"
+          draft: false
+          prerelease: false
+
+      - name: Upload artifact (manual dispatch)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: libuv-${{ steps.version.outputs.version }}-${{ matrix.platform }}
+          path: libuv-${{ steps.version.outputs.version }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
+          retention-days: 7
