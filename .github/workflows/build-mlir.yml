@@ -48,7 +48,7 @@ jobs:
       run:
         shell: ${{ matrix.shell }}
 
-    timeout-minutes: 360
+    timeout-minutes: 720
 
     steps:
       - name: Derive MLIR version from tag
@@ -129,10 +129,14 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/install \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DLLVM_ENABLE_PROJECTS="mlir" \
+            -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld;polly;openmp;mlir" \
+            -DLLVM_ENABLE_RUNTIMES="compiler-rt;libunwind" \
             -DLLVM_BUILD_LLVM_DYLIB=ON \
             -DLLVM_LINK_LLVM_DYLIB=ON \
             -DMLIR_BUILD_MLIR_C_DYLIB=ON \
+            -DMLIR_ENABLE_CUDA_RUNNER=OFF \
+            -DMLIR_ENABLE_ROCM_RUNNER=OFF \
+            -DMLIR_INCLUDE_TESTS=OFF \
             -DLLVM_TARGETS_TO_BUILD="all" \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
@@ -143,7 +147,7 @@ jobs:
             -DLLVM_ENABLE_ZSTD=OFF
 
       # Windows: LLVM_BUILD_LLVM_DYLIB is not supported with the MSVC ABI.
-      # The Windows build produces static LLVM libraries; only the MLIR-C DLL is shared.
+      # The Windows build produces static LLVM libs; only the MLIR-C DLL is shared.
       - name: Configure MLIR (Windows)
         if: runner.os == 'Windows'
         run: |
@@ -155,8 +159,12 @@ jobs:
             -DLLVM_USE_LINKER=lld ^
             -DCMAKE_C_COMPILER_LAUNCHER=ccache ^
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache ^
-            -DLLVM_ENABLE_PROJECTS="mlir" ^
+            -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld;polly;openmp;mlir" ^
+            -DLLVM_ENABLE_RUNTIMES="compiler-rt" ^
             -DMLIR_BUILD_MLIR_C_DYLIB=ON ^
+            -DMLIR_ENABLE_CUDA_RUNNER=OFF ^
+            -DMLIR_ENABLE_ROCM_RUNNER=OFF ^
+            -DMLIR_INCLUDE_TESTS=OFF ^
             -DLLVM_TARGETS_TO_BUILD="all" ^
             -DLLVM_INCLUDE_TESTS=OFF ^
             -DLLVM_INCLUDE_EXAMPLES=OFF ^
