@@ -215,23 +215,7 @@ jobs:
           CMAKE_FILE="circt/llvm/mlir/tools/mlir-irdl-to-cpp/CMakeLists.txt"
           if [ -f "$CMAKE_FILE" ]; then
             echo "Patching $CMAKE_FILE to add missing transitive link dependencies..."
-            cat >> "$CMAKE_FILE" << 'EOF'
-
-# Workflow patch: explicit transitive deps for MinGW static link builds.
-# mlir_target_link_libraries does not propagate transitive static archives
-# on MinGW when LLVM_LINK_LLVM_DYLIB=OFF. List them explicitly here.
-target_link_libraries(mlir-irdl-to-cpp
-  PRIVATE
-    MLIRIR
-    MLIRParser
-    MLIRSupport
-    MLIRBytecodeReader
-    MLIRIRDLToLLVMIRTranslation
-    MLIRTranslateLib
-    MLIRFunctionInterfaces
-    MLIRTargetIRDLToCpp
-)
-EOF
+            printf '\n# Workflow patch: explicit transitive deps for MinGW static link builds.\n# mlir_target_link_libraries does not propagate transitive static archives\n# on MinGW when LLVM_LINK_LLVM_DYLIB=OFF. List them explicitly here.\ntarget_link_libraries(mlir-irdl-to-cpp\n  PRIVATE\n    MLIRIR\n    MLIRParser\n    MLIRSupport\n    MLIRBytecodeReader\n    MLIRIRDLToLLVMIRTranslation\n    MLIRTranslateLib\n    MLIRFunctionInterfaces\n    MLIRTargetIRDLToCpp\n)\n' >> "$CMAKE_FILE"
             echo "Patch applied."
           else
             echo "mlir-irdl-to-cpp/CMakeLists.txt not found — skipping patch."
@@ -248,21 +232,7 @@ EOF
           PDLL_FILE="circt/llvm/mlir/tools/mlir-pdll/CMakeLists.txt"
           if [ -f "$PDLL_FILE" ]; then
             echo "Patching $PDLL_FILE to add missing transitive link dependencies..."
-            cat >> "$PDLL_FILE" << 'EOF'
-
-# Workflow patch: explicit transitive deps for MinGW static link builds.
-target_link_libraries(mlir-pdll
-  PRIVATE
-    MLIRIR
-    MLIRSupport
-    MLIRParser
-    MLIRPDLLCodeGen
-    MLIRPDLLAST
-    MLIRPDLLODS
-    MLIRPDLLParser
-    MLIRSideEffectInterfaces
-)
-EOF
+            printf '\n# Workflow patch: explicit transitive deps for MinGW static link builds.\ntarget_link_libraries(mlir-pdll\n  PRIVATE\n    MLIRIR\n    MLIRSupport\n    MLIRParser\n    MLIRPDLLCodeGen\n    MLIRPDLLAST\n    MLIRPDLLODS\n    MLIRPDLLParser\n    MLIRSideEffectInterfaces\n)\n' >> "$PDLL_FILE"
             echo "Patch applied."
           else
             echo "mlir-pdll/CMakeLists.txt not found — skipping patch."
