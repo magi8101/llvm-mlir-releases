@@ -105,7 +105,7 @@ Trigger the `Build MLIR Python Bindings` workflow manually from the Actions tab 
 !pip install /content/mlir_python_bindings-<version>-cp3XX-cp3XX-linux_x86_64.whl
 ```
 
-**The wheel's Python version must match Colab's runtime exactly.** The compiled `.so` extensions are built against a specific CPython ABI (not the stable/limited ABI), so a `cp311` wheel will fail to import (or, with the platform-tagged wheel this workflow produces, fail to *install*) on a `cp310` or `cp312` runtime. Check Colab's version first with `!python -V` and set the workflow's `python_version` input to match before triggering a build.
+**The wheel's Python version must match Colab's runtime exactly.** The compiled `.so` extensions are built against a specific CPython ABI (not the stable/limited ABI), so a `cp313` wheel will fail to import (or, with the platform-tagged wheel this workflow produces, fail to *install*) on a `cp314` runtime, and vice versa. The workflow only offers `3.13` and `3.14` as inputs — `3.13` is the safer default (better package-ecosystem support for `numpy`/`nanobind` as of this writing); pick `3.14` only if Colab's runtime is actually on 3.14. Check Colab's version first with `!python -V` and set the workflow's `python_version` input to match before triggering a build.
 
 **Expected build time:** unverified — this workflow has not had a real run yet. It builds only the `MLIRPythonModules` target (not the full `all` target), so it should be faster than the full LLVM/Clang/MLIR release builds above, but LLVM/MLIR core plus the NVPTX and AMDGPU codegen backends still have to compile from scratch on a cache-cold run; budget at least an hour on a GitHub-hosted runner until a real run gives an actual number.
 

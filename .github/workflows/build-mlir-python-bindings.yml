@@ -22,10 +22,9 @@ on:
         required: true
         type: choice
         options:
-          - "3.10"
-          - "3.11"
-          - "3.12"
-        default: "3.11"
+          - "3.13"
+          - "3.14"
+        default: "3.13"
       targets:
         description: "LLVM_TARGETS_TO_BUILD value. Must include NVPTX for the required smoke test to run."
         required: true
