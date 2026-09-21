@@ -1,0 +1,361 @@
+# Builds llvm-project with MLIR_ENABLE_BINDINGS_PYTHON=ON (NVPTX + AMDGPU backends)
+# and publishes a Linux x64 wheel, for use in Google Colab (T4 GPU) to compile
+# MLIR gpu-dialect kernels to PTX from Python.
+#
+# Authored fresh against llvm-project @ main (commit 37f85ad1b302, 2026-09-21) — see
+# the PR description / commit history on this branch for the source citations behind
+# each choice below. It has NOT been run yet; treat it as unverified until a real
+# workflow_dispatch run succeeds (see inline "UNCERTAIN" notes for what only a real
+# run can confirm).
+name: Build MLIR Python Bindings
+
+on:
+  workflow_dispatch:
+    inputs:
+      llvm_ref:
+        description: "llvm-project ref to build: a tag (e.g. llvmorg-19.1.0), branch, or full commit SHA"
+        required: true
+        type: string
+        default: "main"
+      python_version:
+        description: "CPython version to build the extension against — MUST match the Python running in Colab (check with `!python -V` there first)"
+        required: true
+        type: choice
+        options:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+        default: "3.11"
+      targets:
+        description: "LLVM_TARGETS_TO_BUILD value. Must include NVPTX for the required smoke test to run."
+        required: true
+        type: string
+        default: "NVPTX;AMDGPU"
+      extra_cmake_args:
+        description: "Extra -D arguments appended verbatim to the cmake configure command"
+        required: false
+        type: string
+        default: ""
+      assertions:
+        description: "Build with LLVM_ENABLE_ASSERTIONS=ON (slower, catches more bugs — usually not needed just to compile kernels)"
+        required: true
+        type: boolean
+        default: false
+      publish_release:
+        description: "Attach the built wheel to a new GitHub Release (created as a prerelease)"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # UNCERTAIN: only a real run confirms the wheel's glibc requirement is <= Colab's
+    # runtime glibc. ubuntu-latest tracks newer Ubuntu than Colab may run; if imports
+    # fail in Colab with a GLIBC_X.YY not found error, pin this to an older ubuntu-*.*
+    # runner image instead.
+    runs-on: ubuntu-latest
+
+    # UNCERTAIN: this is a rough estimate (only MLIRPythonModules is built, not "all",
+    # but LLVM/MLIR core + NVPTX + AMDGPU codegen still have to compile from scratch on
+    # a 4-core runner on a cache-cold run). Only a real run confirms actual wall time.
+    timeout-minutes: 360
+
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 5G
+
+    steps:
+      - name: Compute build metadata
+        id: meta
+        run: |
+          RAW_REF="${{ inputs.llvm_ref }}"
+          SAFE_REF=$(echo "$RAW_REF" | sed -E 's#[^A-Za-z0-9_.-]+#-#g')
+          VERSION_LOCAL=$(echo "$SAFE_REF" | sed -E 's#[^A-Za-z0-9]+#.#g')
+          echo "safe_ref=${SAFE_REF}" >> "$GITHUB_OUTPUT"
+          echo "wheel_version=0.0.0+${VERSION_LOCAL}" >> "$GITHUB_OUTPUT"
+          echo "Building MLIR Python bindings for llvm-project@${RAW_REF} (targets: ${{ inputs.targets }}, python: ${{ inputs.python_version }})"
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache
+
+      # Reused verbatim from build-mlir.yml: this is also a full source build of
+      # LLVM+MLIR (plus NVPTX/AMDGPU codegen), with the same disk footprint concerns.
+      - name: Free disk space (Linux)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Set up Python
+        id: setup-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      # Explicit restore/save (instead of hendrikmuhs/ccache-action used elsewhere in
+      # this repo) so the save step can run under if: always() — this workflow builds
+      # arbitrary/unverified refs, so a failed or cancelled build should still bank
+      # whatever objects it managed to compile.
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: mlir-python-bindings-linux-x64-${{ steps.meta.outputs.safe_ref }}-${{ inputs.targets }}-${{ inputs.python_version }}-${{ github.run_id }}
+          restore-keys: |
+            mlir-python-bindings-linux-x64-${{ steps.meta.outputs.safe_ref }}-${{ inputs.targets }}-${{ inputs.python_version }}-
+            mlir-python-bindings-linux-x64-${{ steps.meta.outputs.safe_ref }}-
+
+      # Fetch by ref (not --branch) so llvm_ref may be a tag, a branch, or a full SHA.
+      - name: Clone LLVM source
+        run: |
+          mkdir llvm-project && cd llvm-project
+          git init -q
+          git remote add origin https://github.com/llvm/llvm-project.git
+          git fetch --depth 1 origin "${{ inputs.llvm_ref }}"
+          git checkout -q FETCH_HEAD
+          echo "Checked out llvm-project @ $(git rev-parse HEAD)"
+
+      # mlir/python/requirements.txt pins nanobind/PyYAML/typing_extensions (build)
+      # and numpy/ml_dtypes (runtime). CMake's MLIRDetectPythonEnv.cmake locates
+      # nanobind's cmake dir automatically as long as it's installed into the same
+      # interpreter passed via -DPython3_EXECUTABLE below.
+      - name: Install MLIR Python bindings build requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r llvm-project/mlir/python/requirements.txt
+          python -m pip install --upgrade setuptools wheel
+
+      - name: Configure MLIR Python bindings
+        run: |
+          cmake -G Ninja -S llvm-project/llvm -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DLLVM_ENABLE_PROJECTS="mlir" \
+            -DLLVM_TARGETS_TO_BUILD="${{ inputs.targets }}" \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_ENABLE_ASSERTIONS=${{ inputs.assertions }} \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+            -DMLIR_INCLUDE_TESTS=OFF \
+            -DPython3_EXECUTABLE=${{ steps.setup-python.outputs.python-path }} \
+            ${{ inputs.extra_cmake_args }}
+
+      # Building only the MLIRPythonModules target (confirmed to exist in
+      # mlir/python/CMakeLists.txt) instead of "all" — it pulls in exactly the
+      # MLIR core + NVPTX/AMDGPU codegen libs the bindings need, nothing else.
+      - name: Build MLIRPythonModules
+        run: cmake --build build --target MLIRPythonModules --parallel "$(nproc)"
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: mlir-python-bindings-linux-x64-${{ steps.meta.outputs.safe_ref }}-${{ inputs.targets }}-${{ inputs.python_version }}-${{ github.run_id }}
+
+      # Confirmed against mlir/CMakeLists.txt + mlir/cmake/modules/AddMLIRPython.cmake:
+      # MLIR_BINDINGS_PYTHON_INSTALL_PREFIX defaults to "python_packages/mlir_core/mlir"
+      # under MLIR_BINARY_DIR (= build/tools/mlir, since MLIR is wired in via
+      # add_llvm_external_project(mlir) in llvm/tools/CMakeLists.txt). So the "mlir"
+      # package lives directly under build/tools/mlir/python_packages/mlir_core — that
+      # directory is the wheel's package root.
+      #
+      # LLVM's own build does NOT generate a setup.py/MANIFEST.in for this tree (its
+      # docs explicitly avoid __init__.py at the top so downstream can package it
+      # however it likes) — this workflow writes both itself.
+      #
+      # The extensions are MODULE libraries built with NO_SONAME=ON and no
+      # VERSION/SOVERSION set, so there are no symlinks to worry about: every .so
+      # under mlir/_mlir_libs is a plain regular file. They're loaded with an
+      # $ORIGIN RPATH, so the whole _mlir_libs directory must ship as one unit —
+      # a plain recursive include of the mlir/ package (via MANIFEST.in) satisfies
+      # that automatically.
+      #
+      # has_ext_modules() is overridden so bdist_wheel tags the wheel as a platform
+      # wheel (e.g. cp311-cp311-linux_x86_64) instead of the default "py3-none-any" —
+      # without this, pip would happily "install" the wheel on any Python version and
+      # the mismatch would only surface as a cryptic ImportError at import time.
+      - name: Build wheel
+        id: wheel
+        run: |
+          set -euo pipefail
+          PKG_DIR="build/tools/mlir/python_packages/mlir_core"
+
+          cat <<'PYEOF' > "$PKG_DIR/setup.py"
+          from setuptools import setup, find_namespace_packages
+          from setuptools.dist import Distribution
+
+
+          class BinaryDistribution(Distribution):
+              def has_ext_modules(self):
+                  return True
+
+
+          setup(
+              name="mlir-python-bindings",
+              version="VERSION_PLACEHOLDER",
+              description="Prebuilt MLIR Python bindings (NVPTX/AMDGPU) from llvm-mlir-releases",
+              packages=find_namespace_packages(include=["mlir", "mlir.*"]),
+              include_package_data=True,
+              distclass=BinaryDistribution,
+              zip_safe=False,
+              python_requires=">=3.8",
+          )
+          PYEOF
+          sed -i "s/VERSION_PLACEHOLDER/${{ steps.meta.outputs.wheel_version }}/" "$PKG_DIR/setup.py"
+
+          cat <<'PYEOF' > "$PKG_DIR/MANIFEST.in"
+          recursive-include mlir *
+          PYEOF
+
+          ( cd "$PKG_DIR" && python setup.py bdist_wheel -d "${{ github.workspace }}/dist" )
+
+          WHEEL_FILE=$(ls dist/*.whl | head -1)
+          echo "wheel_file=${WHEEL_FILE}" >> "$GITHUB_OUTPUT"
+          echo "Built: ${WHEEL_FILE}"
+
+      # Pipeline strings and IR syntax below are checked against real llvm-project
+      # test files at the commit this workflow was authored against:
+      #   mlir/test/Conversion/GPUToNVVM/gpu-to-nvvm-target-attr.mlir (gpu.func ... kernel { })
+      #   mlir/test/Dialect/GPU/nvvm-attach-target.mlir (top-level --nvvm-attach-target)
+      #   mlir/test/Dialect/GPU/module-to-binary-nvvm.mlir (top-level --gpu-module-to-binary="format=isa", asserts "gpu.binary" in output)
+      # NVPTX (chip=sm_75, matching the Colab T4's compute capability 7.5) is the
+      # required check; AMDGPU and the Python-defined-pass check are informational.
+      - name: Extract smoke test script
+        run: |
+          cat <<'PYEOF' > smoke_test.py
+          from mlir.ir import Context, Module
+          from mlir.passmanager import PassManager
+
+          GPU_MODULE = """
+          module attributes {gpu.container_module} {
+            gpu.module @kernels {
+              gpu.func @kernel(%arg0: f32) kernel {
+                gpu.return
+              }
+            }
+          }
+          """
+
+
+          def run_pipeline(pipeline):
+              with Context():
+                  module = Module.parse(GPU_MODULE)
+                  pm = PassManager.parse(pipeline)
+                  pm.run(module.operation)
+                  return str(module)
+
+
+          def nvptx_smoke_test():
+              pipeline = (
+                  "builtin.module("
+                  "gpu.module(convert-gpu-to-nvvm{use-bare-ptr-memref-call-conv=true}),"
+                  "nvvm-attach-target{chip=sm_75},"
+                  "gpu-module-to-binary{format=isa}"
+                  ")"
+              )
+              out = run_pipeline(pipeline)
+              assert "gpu.binary" in out, "expected a gpu.binary op after gpu-module-to-binary"
+              print("[REQUIRED] NVPTX (sm_75) compile pipeline: PASS")
+
+
+          def amdgpu_smoke_test():
+              pipeline = (
+                  "builtin.module("
+                  "gpu.module(convert-gpu-to-rocdl),"
+                  "rocdl-attach-target{chip=gfx90a},"
+                  "gpu-module-to-binary{format=isa}"
+                  ")"
+              )
+              out = run_pipeline(pipeline)
+              assert "gpu.binary" in out
+              print("[INFO] AMDGPU (gfx90a) compile pipeline: PASS")
+
+
+          def python_pass_smoke_test():
+              with Context():
+                  module = Module.parse(GPU_MODULE)
+                  pm = PassManager()
+
+                  def noop_pass(op, pass_obj):
+                      pass
+
+                  pm.add(
+                      noop_pass,
+                      name="noop",
+                      argument="noop",
+                      description="no-op python-defined pass",
+                      opName="builtin.module",
+                  )
+                  pm.run(module.operation)
+              print("[INFO] PassManager.add(callable) python-defined pass: PASS")
+
+
+          def main():
+              nvptx_smoke_test()
+              informational_failures = []
+              for name, fn in (("amdgpu", amdgpu_smoke_test), ("python-pass", python_pass_smoke_test)):
+                  try:
+                      fn()
+                  except Exception as exc:
+                      informational_failures.append(name)
+                      print("[INFO] {} check failed (non-fatal): {}".format(name, exc))
+              if informational_failures:
+                  print("Informational checks that did not pass: {}".format(informational_failures))
+              print("Smoke test complete: required NVPTX check passed.")
+
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
+
+      - name: Run smoke test
+        run: |
+          PYTHONPATH="${{ github.workspace }}/build/tools/mlir/python_packages/mlir_core" python smoke_test.py
+
+      - name: Generate checksum
+        run: |
+          WHEEL_FILE="${{ steps.wheel.outputs.wheel_file }}"
+          if command -v sha256sum &>/dev/null; then
+            sha256sum "$WHEEL_FILE" > "$WHEEL_FILE.sha256"
+          else
+            shasum -a 256 "$WHEEL_FILE" > "$WHEEL_FILE.sha256"
+          fi
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlir-python-bindings-${{ steps.meta.outputs.safe_ref }}-linux-x64-py${{ inputs.python_version }}
+          path: |
+            dist/*.whl
+            dist/*.whl.sha256
+          retention-days: 7
+
+      - name: Upload release assets
+        if: ${{ inputs.publish_release }}
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: |
+            dist/*.whl
+            dist/*.whl.sha256
+          tag_name: mlir-python-bindings-${{ steps.meta.outputs.safe_ref }}
+          name: "MLIR Python Bindings (NVPTX/AMDGPU) ${{ inputs.llvm_ref }}"
+          draft: false
+          prerelease: true
