@@ -27,6 +27,11 @@ This repository builds pre-compiled libraries from official sources using GitHub
    - Unlike LLVM, Windows produces a proper DLL — no static fallback needed.
    - Includes both the shared library (`uv`) and the static library (`uv_a`), plus all headers and CMake config files.
 
+5. **MLIR Python Bindings Release** (e.g., `mlir-python-bindings-<llvm-ref>`, Linux x64 only)
+   - A Linux x64 wheel built with `MLIR_ENABLE_BINDINGS_PYTHON=ON`, plus the **NVPTX** and **AMDGPU** GPU backends.
+   - Triggered manually via `workflow_dispatch` only (not tied to an LLVM release tag) — pick any `llvm_ref` (tag, branch, or commit SHA).
+   - Meant for compiling MLIR `gpu` dialect kernels to PTX from Python, e.g. in Google Colab on a T4 GPU. See [Using the MLIR Python Bindings Wheel](#using-the-mlir-python-bindings-wheel-google-colab) below.
+
 ## Supported Platforms
 
 ### LLVM & MLIR
@@ -87,6 +92,22 @@ cmake -Dlibuv_DIR=/path/to/extracted/lib/cmake/libuv ..
 find_package(libuv REQUIRED CONFIG)
 target_link_libraries(my_target PRIVATE libuv::libuv)
 ```
+
+## Using the MLIR Python Bindings Wheel (Google Colab)
+
+Trigger the `Build MLIR Python Bindings` workflow manually from the Actions tab (see below), then download the wheel from the run's workflow artifact (or from the matching `mlir-python-bindings-*` Release if `publish_release` was enabled). Upload it to your Colab session and install it:
+
+```bash
+# The wheel's top-level importable package is `mlir`, which collides with the
+# PyPI `mlir` package and with a previously installed `mlir-python-bindings` —
+# remove both first to avoid a stale/mixed install.
+!pip uninstall -y mlir mlir-python-bindings
+!pip install /content/mlir_python_bindings-<version>-cp3XX-cp3XX-linux_x86_64.whl
+```
+
+**The wheel's Python version must match Colab's runtime exactly.** The compiled `.so` extensions are built against a specific CPython ABI (not the stable/limited ABI), so a `cp311` wheel will fail to import (or, with the platform-tagged wheel this workflow produces, fail to *install*) on a `cp310` or `cp312` runtime. Check Colab's version first with `!python -V` and set the workflow's `python_version` input to match before triggering a build.
+
+**Expected build time:** unverified — this workflow has not had a real run yet. It builds only the `MLIRPythonModules` target (not the full `all` target), so it should be faster than the full LLVM/Clang/MLIR release builds above, but LLVM/MLIR core plus the NVPTX and AMDGPU codegen backends still have to compile from scratch on a cache-cold run; budget at least an hour on a GitHub-hosted runner until a real run gives an actual number.
 
 ## Local Build Reproduction
 
