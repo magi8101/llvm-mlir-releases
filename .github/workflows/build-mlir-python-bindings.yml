@@ -31,7 +31,7 @@ on:
         type: string
         default: "NVPTX;AMDGPU"
       extra_cmake_args:
-        description: "Extra -D arguments appended verbatim to the cmake configure command"
+        description: "Extra -D arguments for cmake, one per line (e.g. '-DFOO=ON' on its own line, not space-separated)"
         required: false
         type: string
         default: ""
@@ -46,8 +46,10 @@ on:
         type: boolean
         default: false
 
+# Build stays read-only; only the release job (which actually needs to write a tag
+# and release) gets contents: write, scoped to just that job.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -62,19 +64,27 @@ jobs:
     # a 4-core runner on a cache-cold run). Only a real run confirms actual wall time.
     timeout-minutes: 360
 
+    outputs:
+      safe_ref: ${{ steps.meta.outputs.safe_ref }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      short_sha: ${{ steps.version.outputs.short_sha }}
+
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 5G
 
     steps:
+      # safe_ref is derived from the *requested* ref text (not the resolved commit) on
+      # purpose: it only feeds the cache key and artifact display name, where a stable
+      # name for e.g. repeated "main" builds is desirable. The wheel's actual version
+      # and the release tag are computed later, from the resolved commit (see "Compute
+      # wheel version") so two builds of a mutable ref never collide on either.
       - name: Compute build metadata
         id: meta
         run: |
           RAW_REF="${{ inputs.llvm_ref }}"
           SAFE_REF=$(echo "$RAW_REF" | sed -E 's#[^A-Za-z0-9_.-]+#-#g')
-          VERSION_LOCAL=$(echo "$SAFE_REF" | sed -E 's#[^A-Za-z0-9]+#.#g')
           echo "safe_ref=${SAFE_REF}" >> "$GITHUB_OUTPUT"
-          echo "wheel_version=0.0.0+${VERSION_LOCAL}" >> "$GITHUB_OUTPUT"
           echo "Building MLIR Python bindings for llvm-project@${RAW_REF} (targets: ${{ inputs.targets }}, python: ${{ inputs.python_version }})"
 
       - name: Install build tools
@@ -116,13 +126,32 @@ jobs:
 
       # Fetch by ref (not --branch) so llvm_ref may be a tag, a branch, or a full SHA.
       - name: Clone LLVM source
+        id: clone
         run: |
           mkdir llvm-project && cd llvm-project
           git init -q
           git remote add origin https://github.com/llvm/llvm-project.git
           git fetch --depth 1 origin "${{ inputs.llvm_ref }}"
           git checkout -q FETCH_HEAD
-          echo "Checked out llvm-project @ $(git rev-parse HEAD)"
+          RESOLVED_SHA=$(git rev-parse HEAD)
+          echo "resolved_sha=${RESOLVED_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Checked out llvm-project @ ${RESOLVED_SHA}"
+
+      # Version/tag are keyed off the *resolved* commit, not the requested llvm_ref
+      # text: two builds of a mutable ref (e.g. llvm_ref=main on different days) must
+      # not produce the same wheel version or release tag, or pip can keep a stale
+      # cached wheel and a second publish_release run would collide on the tag.
+      - name: Compute wheel version
+        id: version
+        env:
+          RESOLVED_SHA: ${{ steps.clone.outputs.resolved_sha }}
+          SAFE_REF: ${{ steps.meta.outputs.safe_ref }}
+        run: |
+          SHORT_SHA="${RESOLVED_SHA:0:12}"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "wheel_version=0.0.0+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=mlir-python-bindings-${SAFE_REF}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Resolved llvm_ref='${{ inputs.llvm_ref }}' (kept only as descriptive metadata) to commit ${RESOLVED_SHA}"
 
       # mlir/python/requirements.txt pins nanobind/PyYAML/typing_extensions (build)
       # and numpy/ml_dtypes (runtime). CMake's MLIRDetectPythonEnv.cmake locates
@@ -134,25 +163,39 @@ jobs:
           python -m pip install -r llvm-project/mlir/python/requirements.txt
           python -m pip install --upgrade setuptools wheel
 
+      # Inputs go through env and are quoted, rather than interpolated directly into
+      # the script text, so shell metacharacters in any of them can't break the
+      # command or inject extra ones. extra_cmake_args is one -D flag per line,
+      # appended as a proper bash array instead of a raw unquoted word-split blob.
       - name: Configure MLIR Python bindings
+        env:
+          TARGETS: ${{ inputs.targets }}
+          ASSERTIONS: ${{ inputs.assertions }}
+          PY_EXECUTABLE: ${{ steps.setup-python.outputs.python-path }}
+          EXTRA_CMAKE_ARGS: ${{ inputs.extra_cmake_args }}
         run: |
+          set -euo pipefail
+          EXTRA_ARGS=()
+          if [[ -n "$EXTRA_CMAKE_ARGS" ]]; then
+            mapfile -t EXTRA_ARGS <<< "$EXTRA_CMAKE_ARGS"
+          fi
           cmake -G Ninja -S llvm-project/llvm -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DLLVM_ENABLE_PROJECTS="mlir" \
-            -DLLVM_TARGETS_TO_BUILD="${{ inputs.targets }}" \
+            -DLLVM_TARGETS_TO_BUILD="$TARGETS" \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_INCLUDE_DOCS=OFF \
-            -DLLVM_ENABLE_ASSERTIONS=${{ inputs.assertions }} \
+            -DLLVM_ENABLE_ASSERTIONS="$ASSERTIONS" \
             -DLLVM_ENABLE_ZLIB=OFF \
             -DLLVM_ENABLE_ZSTD=OFF \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
             -DMLIR_INCLUDE_TESTS=OFF \
-            -DPython3_EXECUTABLE=${{ steps.setup-python.outputs.python-path }} \
-            ${{ inputs.extra_cmake_args }}
+            -DPython3_EXECUTABLE="$PY_EXECUTABLE" \
+            "${EXTRA_ARGS[@]}"
 
       # Building only the MLIRPythonModules target (confirmed to exist in
       # mlir/python/CMakeLists.txt) instead of "all" — it pulls in exactly the
@@ -216,7 +259,7 @@ jobs:
               python_requires=">=3.8",
           )
           PYEOF
-          sed -i "s/VERSION_PLACEHOLDER/${{ steps.meta.outputs.wheel_version }}/" "$PKG_DIR/setup.py"
+          sed -i "s/VERSION_PLACEHOLDER/${{ steps.version.outputs.wheel_version }}/" "$PKG_DIR/setup.py"
 
           cat <<'PYEOF' > "$PKG_DIR/MANIFEST.in"
           recursive-include mlir *
@@ -323,9 +366,18 @@ jobs:
               main()
           PYEOF
 
-      - name: Run smoke test
+      # Installs the actual dist/*.whl into a clean venv rather than pointing
+      # PYTHONPATH at the raw build tree — that way the smoke test validates what
+      # will really ship (missing package_data or a broken MANIFEST.in would show up
+      # here as an ImportError, instead of only surfacing after someone installs it).
+      - name: Install wheel into a clean virtualenv
         run: |
-          PYTHONPATH="${{ github.workspace }}/build/tools/mlir/python_packages/mlir_core" python smoke_test.py
+          python -m venv .venv-smoketest
+          .venv-smoketest/bin/python -m pip install --upgrade pip
+          .venv-smoketest/bin/pip install "${{ steps.wheel.outputs.wheel_file }}"
+
+      - name: Run smoke test
+        run: .venv-smoketest/bin/python smoke_test.py
 
       - name: Generate checksum
         run: |
@@ -345,8 +397,22 @@ jobs:
             dist/*.whl.sha256
           retention-days: 7
 
+  # Split out from `build` so contents: write (needed to create a tag + release) is
+  # scoped to only this job, instead of every step of the multi-hour build job.
+  release:
+    needs: build
+    if: ${{ inputs.publish_release }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mlir-python-bindings-${{ needs.build.outputs.safe_ref }}-linux-x64-py${{ inputs.python_version }}
+          path: dist
+
       - name: Upload release assets
-        if: ${{ inputs.publish_release }}
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -354,7 +420,7 @@ jobs:
           files: |
             dist/*.whl
             dist/*.whl.sha256
-          tag_name: mlir-python-bindings-${{ steps.meta.outputs.safe_ref }}
-          name: "MLIR Python Bindings (NVPTX/AMDGPU) ${{ inputs.llvm_ref }}"
+          tag_name: ${{ needs.build.outputs.release_tag }}
+          name: "MLIR Python Bindings (NVPTX/AMDGPU) ${{ inputs.llvm_ref }} (${{ needs.build.outputs.short_sha }})"
           draft: false
           prerelease: true
